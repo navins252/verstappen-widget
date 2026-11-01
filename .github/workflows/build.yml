@@ -1,0 +1,253 @@
+name: Build APK
+on:
+  push:
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - name: Create Android project
+        run: |
+          mkdir -p .
+          cat > settings.gradle.kts <<'EOF'
+          pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+          dependencyResolutionManagement { repositories { google(); mavenCentral() } }
+          rootProject.name = "VerstappenWidget"
+          include(":app")
+          EOF
+          mkdir -p .
+          cat > build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          EOF
+          mkdir -p app
+          cat > app/build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+          android {
+              namespace = "com.example.vertracker"
+              compileSdk = 34
+              defaultConfig {
+                  applicationId = "com.example.vertracker"
+                  minSdk = 26
+                  targetSdk = 34
+                  versionCode = 1
+                  versionName = "1.0"
+              }
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions { jvmTarget = "17" }
+          }
+          EOF
+          mkdir -p app/src/main
+          cat > app/src/main/AndroidManifest.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <application android:label="Verstappen Widget">
+                  <activity android:name=".MainActivity" android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN"/>
+                          <category android:name="android.intent.category.LAUNCHER"/>
+                      </intent-filter>
+                  </activity>
+                  <receiver android:name=".VerstappenWidget" android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.appwidget.action.APPWIDGET_UPDATE"/>
+                      </intent-filter>
+                      <meta-data android:name="android.appwidget.provider" android:resource="@xml/widget_info"/>
+                  </receiver>
+              </application>
+          </manifest>
+          EOF
+          mkdir -p app/src/main/java/com/example/vertracker
+          cat > app/src/main/java/com/example/vertracker/MainActivity.kt <<'EOF'
+          package com.example.vertracker
+          
+          import android.app.Activity
+          import android.os.Bundle
+          import android.widget.TextView
+          
+          class MainActivity : Activity() {
+              override fun onCreate(b: Bundle?) {
+                  super.onCreate(b)
+                  setContentView(TextView(this).apply {
+                      text = "Long-press your home screen, tap Widgets, and add Verstappen Widget."
+                      textSize = 18f
+                      setPadding(48, 96, 48, 48)
+                  })
+              }
+          }
+          EOF
+          mkdir -p app/src/main/java/com/example/vertracker
+          cat > app/src/main/java/com/example/vertracker/VerstappenWidget.kt <<'EOF'
+          package com.example.vertracker
+          
+          import android.appwidget.AppWidgetManager
+          import android.appwidget.AppWidgetProvider
+          import android.content.Context
+          import android.os.SystemClock
+          import android.widget.RemoteViews
+          import java.time.Instant
+          import java.time.ZoneId
+          import java.time.format.DateTimeFormatter
+          
+          class VerstappenWidget : AppWidgetProvider() {
+          
+              data class Race(val name: String, val startUtc: String)
+          
+              // EDIT THESE: upcoming races, in order. Times are UTC (GMT in winter).
+              private val races = listOf(
+                  Race("Mexico City GP", "2026-11-01T20:00:00Z"),
+                  Race("Brazilian GP (time TBC)", "2026-11-08T17:00:00Z")
+              )
+          
+              // EDIT THESE after each race.
+              private val position = "P4"
+              private val points = "236"
+              private val wins = "2"
+              private val podiums = "10"
+          
+              // Newest first: race, finish, points scored that weekend (race + sprint)
+              private val recent = listOf(
+                  Triple("United States", "P3", 15),
+                  Triple("Singapore", "P1", 33),
+                  Triple("Bahrain", "P1", 25),
+                  Triple("Azerbaijan", "P2", 18),
+                  Triple("Spain", "P2", 18),
+                  Triple("Italy", "P3", 15),
+                  Triple("Netherlands", "RET", 3)
+              )
+          
+              override fun onUpdate(ctx: Context, mgr: AppWidgetManager, ids: IntArray) {
+                  val now = Instant.now()
+                  val next = races.firstOrNull { Instant.parse(it.startUtc).plusSeconds(7200).isAfter(now) }
+                  val uk = DateTimeFormatter.ofPattern("EEEE d MMMM · HH:mm")
+                      .withZone(ZoneId.of("Europe/London"))
+                  val list = recent.joinToString("\n") { (r, p, pts) ->
+                      r.padEnd(14) + p.padEnd(5) + "+$pts"
+                  }
+          
+                  for (id in ids) {
+                      val v = RemoteViews(ctx.packageName, R.layout.widget_verstappen)
+                      v.setTextViewText(R.id.pos, position)
+                      v.setTextViewText(R.id.pts, points)
+                      v.setTextViewText(R.id.wins, wins)
+                      v.setTextViewText(R.id.pod, podiums)
+                      v.setTextViewText(R.id.recent, list)
+                      if (next != null) {
+                          val start = Instant.parse(next.startUtc)
+                          v.setTextViewText(R.id.race, next.name)
+                          v.setTextViewText(R.id.time, uk.format(start) + " (UK)")
+                          val msLeft = start.toEpochMilli() - now.toEpochMilli()
+                          v.setChronometerCountDown(R.id.countdown, true)
+                          v.setChronometer(R.id.countdown, SystemClock.elapsedRealtime() + msLeft, null, msLeft > 0)
+                      } else {
+                          v.setTextViewText(R.id.race, "Season over")
+                          v.setTextViewText(R.id.time, "")
+                      }
+                      mgr.updateAppWidget(id, v)
+                  }
+              }
+          }
+          EOF
+          mkdir -p app/src/main/res/layout
+          cat > app/src/main/res/layout/widget_verstappen.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+              android:layout_width="match_parent" android:layout_height="match_parent"
+              android:orientation="vertical" android:padding="20dp"
+              android:background="@drawable/widget_bg">
+          
+              <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
+                  android:text="MAX VERSTAPPEN · RED BULL #3" android:textColor="#9097A0"
+                  android:textSize="12sp" android:letterSpacing="0.08"/>
+          
+              <TextView android:id="@+id/race" android:layout_width="wrap_content"
+                  android:layout_height="wrap_content" android:layout_marginTop="14dp"
+                  android:textColor="#F0F1F3" android:textSize="26sp" android:textStyle="bold"/>
+              <TextView android:id="@+id/time" android:layout_width="wrap_content"
+                  android:layout_height="wrap_content" android:textColor="#F0F1F3" android:textSize="15sp"/>
+              <Chronometer android:id="@+id/countdown" android:layout_width="wrap_content"
+                  android:layout_height="wrap_content" android:layout_marginTop="6dp"
+                  android:textColor="#E10600" android:textSize="48sp" android:textStyle="bold"/>
+          
+              <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+                  android:orientation="horizontal" android:layout_marginTop="18dp">
+                  <LinearLayout android:layout_width="0dp" android:layout_height="wrap_content"
+                      android:layout_weight="1" android:orientation="vertical">
+                      <TextView android:id="@+id/pos" android:layout_width="wrap_content" android:layout_height="wrap_content"
+                          android:textColor="#F0F1F3" android:textSize="28sp" android:textStyle="bold"/>
+                      <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
+                          android:text="Standing" android:textColor="#9097A0" android:textSize="11sp"/>
+                  </LinearLayout>
+                  <LinearLayout android:layout_width="0dp" android:layout_height="wrap_content"
+                      android:layout_weight="1" android:orientation="vertical">
+                      <TextView android:id="@+id/pts" android:layout_width="wrap_content" android:layout_height="wrap_content"
+                          android:textColor="#F0F1F3" android:textSize="28sp" android:textStyle="bold"/>
+                      <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
+                          android:text="Points" android:textColor="#9097A0" android:textSize="11sp"/>
+                  </LinearLayout>
+                  <LinearLayout android:layout_width="0dp" android:layout_height="wrap_content"
+                      android:layout_weight="1" android:orientation="vertical">
+                      <TextView android:id="@+id/wins" android:layout_width="wrap_content" android:layout_height="wrap_content"
+                          android:textColor="#F0F1F3" android:textSize="28sp" android:textStyle="bold"/>
+                      <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
+                          android:text="Wins" android:textColor="#9097A0" android:textSize="11sp"/>
+                  </LinearLayout>
+                  <LinearLayout android:layout_width="0dp" android:layout_height="wrap_content"
+                      android:layout_weight="1" android:orientation="vertical">
+                      <TextView android:id="@+id/pod" android:layout_width="wrap_content" android:layout_height="wrap_content"
+                          android:textColor="#F0F1F3" android:textSize="28sp" android:textStyle="bold"/>
+                      <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
+                          android:text="Podiums" android:textColor="#9097A0" android:textSize="11sp"/>
+                  </LinearLayout>
+              </LinearLayout>
+          
+              <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
+                  android:layout_marginTop="20dp" android:text="RECENT RESULTS · PTS"
+                  android:textColor="#9097A0" android:textSize="11sp" android:letterSpacing="0.08"/>
+              <TextView android:id="@+id/recent" android:layout_width="match_parent"
+                  android:layout_height="wrap_content" android:layout_marginTop="6dp"
+                  android:typeface="monospace" android:lineSpacingExtra="4dp"
+                  android:textColor="#F0F1F3" android:textSize="14sp"/>
+          </LinearLayout>
+          EOF
+          mkdir -p app/src/main/res/drawable
+          cat > app/src/main/res/drawable/widget_bg.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <shape xmlns:android="http://schemas.android.com/apk/res/android">
+              <solid android:color="#14161A"/>
+              <corners android:radius="20dp"/>
+          </shape>
+          EOF
+          mkdir -p app/src/main/res/xml
+          cat > app/src/main/res/xml/widget_info.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <appwidget-provider xmlns:android="http://schemas.android.com/apk/res/android"
+              android:minWidth="320dp" android:minHeight="320dp"
+              android:targetCellWidth="5" android:targetCellHeight="5"
+              android:updatePeriodMillis="1800000"
+              android:initialLayout="@layout/widget_verstappen"
+              android:resizeMode="horizontal|vertical"
+              android:widgetCategory="home_screen"/>
+          EOF
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.7
+      - name: Build
+        run: gradle assembleDebug --no-daemon
+      - uses: actions/upload-artifact@v4
+        with:
+          name: verstappen-widget-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
